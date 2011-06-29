@@ -13,6 +13,7 @@ AES4000_SRC = drivers/aes4000.c
 FDU2000_SRC = drivers/fdu2000.c
 VCOM5S_SRC = drivers/vcom5s.c
 VFS101_SRC = drivers/vfs101.c
+BSAPI_SRC = drivers/bsapi.c
 
 EXTRA_DIST = \
 	$(UPEKE2_SRC)		\
@@ -26,6 +27,7 @@ EXTRA_DIST = \
 	$(FDU2000_SRC)		\
 	$(VCOM5S_SRC)		\
 	$(VFS101_SRC)		\
+	$(BSAPI_SRC)		\
 	aeslib.c aeslib.h	\
 	imagemagick.c		\
 	gdkpixbuf.c
@@ -126,6 +128,10 @@ endif
 
 if ENABLE_VFS101
 DRIVER_SRC += $(VFS101_SRC)
+endif
+
+if ENABLE_BSAPI
+DRIVER_SRC += $(BSAPI_SRC)
 endif
 
 if REQUIRE_IMAGEMAGICK

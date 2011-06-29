@@ -346,6 +346,9 @@ static struct fp_driver * const primitive_drivers[] = {
 #ifdef ENABLE_UPEKE2
     &upeke2_driver,
 #endif
+#ifdef ENABLE_BSAPI
+        &bsapi_driver,
+#endif
 };
 
 static struct fp_img_driver * const img_drivers[] = {
