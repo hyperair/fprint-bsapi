@@ -98,6 +98,7 @@ for driver in `echo ${drivers} | sed -e 's/,/ /g' -e 's/,$//g'`; do
 			enable_vfs101="yes"
 		;;
 		bsapi)
+			AC_CHECK_HEADERS([bsapi.h bserror.h bstypes.h],, [AC_MSG_ERROR([Could not find libbsapi headers])])
 			AC_DEFINE([ENABLE_BSAPI], [], [Build BSAPI bridge])
 			enable_bsapi="yes"
 		;;
@@ -283,6 +284,12 @@ if test x$enable_vfs101 != xno ; then
 else
 	AC_MSG_NOTICE([   vfs101 driver disabled])
 fi
+if test x$enable_bsapi != xno ; then
+	AC_MSG_NOTICE([** bsapi driver enabled])
+else
+	AC_MSG_NOTICE([   bsapi driver disabled])
+fi
+
 if test x$require_aeslib != xno ; then
 	AC_MSG_NOTICE([** aeslib helper functions enabled])
 else
