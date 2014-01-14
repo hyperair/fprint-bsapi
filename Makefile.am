@@ -1,4 +1,3 @@
-AUTOMAKE_OPTIONS = dist-bzip2
 ACLOCAL_AMFLAGS = -I m4
 EXTRA_DIST = THANKS TODO HACKING libfprint.pc.in
 DISTCLEANFILES = ChangeLog libfprint.pc
@@ -8,6 +7,10 @@ SUBDIRS = libfprint doc
 if BUILD_EXAMPLES
 SUBDIRS += examples
 endif
+
+DIST_SUBDIRS = libfprint doc examples
+
+DISTCHECK_CONFIGURE_FLAGS = --with-drivers=all --enable-examples-build --enable-x11-examples-build --with-udev-rules-dir='$${libdir}/udev/rules.d-distcheck'
 
 pkgconfigdir=$(libdir)/pkgconfig
 pkgconfig_DATA=libfprint.pc

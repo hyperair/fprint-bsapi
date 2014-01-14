@@ -2,7 +2,7 @@
  * AuthenTec AES2501 driver for libfprint
  * Copyright (C) 2007-2008 Daniel Drake <dsd@gentoo.org>
  * Copyright (C) 2007 Cyrille Bagard
- * Copyright (C) 2007 Vasily Khoruzhick
+ * Copyright (C) 2007-2008, 2012 Vasily Khoruzhick <anarsoul@gmail.com>
  *
  * Based on code from http://home.gna.org/aes2501, relicensed with permission
  *
@@ -30,7 +30,9 @@
 
 #include <aeslib.h>
 #include <fp_internal.h>
+
 #include "aes2501.h"
+#include "driver_ids.h"
 
 static void start_capture(struct fp_img_dev *dev);
 static void complete_deactivation(struct fp_img_dev *dev);
@@ -67,6 +69,7 @@ struct aes2501_dev {
 	GSList *strips;
 	size_t strips_len;
 	gboolean deactivating;
+	int no_finger_cnt;
 };
 
 typedef void (*aes2501_read_regs_cb)(struct fp_img_dev *dev, int status,
@@ -245,119 +248,6 @@ static int sum_histogram_values(unsigned char *data, uint8_t threshold)
 	return r;
 }
 
-/* find overlapping parts of  frames */
-static unsigned int find_overlap(unsigned char *first_frame,
-	unsigned char *second_frame, unsigned int *min_error)
-{
-	unsigned int dy;
-	unsigned int not_overlapped_height = 0;
-	*min_error = 255 * FRAME_SIZE;
-	for (dy = 0; dy < FRAME_HEIGHT; dy++) {
-		/* Calculating difference (error) between parts of frames */
-		unsigned int i;
-		unsigned int error = 0;
-		for (i = 0; i < FRAME_WIDTH * (FRAME_HEIGHT - dy); i++) {
-			/* Using ? operator to avoid abs function */
-			error += first_frame[i] > second_frame[i] ? 
-					(first_frame[i] - second_frame[i]) :
-					(second_frame[i] - first_frame[i]); 
-		}
-		
-		/* Normalize error */
-		error *= 15;
-		error /= i;
-		if (error < *min_error) {
-			*min_error = error;
-			not_overlapped_height = dy;
-		}
-		first_frame += FRAME_WIDTH;
-	}
-	
-	return not_overlapped_height; 
-}
-
-/* assemble a series of frames into a single image */
-static unsigned int assemble(struct aes2501_dev *aesdev, unsigned char *output,
-	gboolean reverse, unsigned int *errors_sum)
-{
-	uint8_t *assembled = output;
-	int frame;
-	uint32_t image_height = FRAME_HEIGHT;
-	unsigned int min_error;
-	size_t num_strips = aesdev->strips_len;
-	GSList *list_entry = aesdev->strips;
-	*errors_sum = 0;
-
-	/* Rotating given data by 90 degrees 
-	 * Taken from document describing aes2501 image format
-	 * TODO: move reversing detection here */
-
-	if (reverse)
-		output += (num_strips - 1) * FRAME_SIZE;
-	for (frame = 0; frame < num_strips; frame++) {
-		aes_assemble_image(list_entry->data, FRAME_WIDTH, FRAME_HEIGHT, output);
-
-		if (reverse)
-		    output -= FRAME_SIZE;
-		else
-		    output += FRAME_SIZE;
-		list_entry = g_slist_next(list_entry);
-	}
-
-	/* Detecting where frames overlaped */
-	output = assembled;
-	for (frame = 1; frame < num_strips; frame++) {
-		int not_overlapped;
-
-		output += FRAME_SIZE;
-		not_overlapped = find_overlap(assembled, output, &min_error);
-		*errors_sum += min_error;
-		image_height += not_overlapped;
-		assembled += FRAME_WIDTH * not_overlapped;
-		memcpy(assembled, output, FRAME_SIZE); 
-	}
-	return image_height;
-}
-
-static void assemble_and_submit_image(struct fp_img_dev *dev)
-{
-	struct aes2501_dev *aesdev = dev->priv;
-	size_t final_size;
-	struct fp_img *img;
-	unsigned int errors_sum, r_errors_sum;
-
-	BUG_ON(aesdev->strips_len == 0);
-
-	/* reverse list */
-	aesdev->strips = g_slist_reverse(aesdev->strips);
-
-	/* create buffer big enough for max image */
-	img = fpi_img_new(aesdev->strips_len * FRAME_SIZE);
-
-	img->flags = FP_IMG_COLORS_INVERTED;
-	img->height = assemble(aesdev, img->data, FALSE, &errors_sum);
-	img->height = assemble(aesdev, img->data, TRUE, &r_errors_sum);
-	
-	if (r_errors_sum > errors_sum) {
-	    img->height = assemble(aesdev, img->data, FALSE, &errors_sum);
-		img->flags |= FP_IMG_V_FLIPPED | FP_IMG_H_FLIPPED;
-		fp_dbg("normal scan direction");
-	} else {
-		fp_dbg("reversed scan direction");
-	}
-
-	/* now that overlap has been removed, resize output image buffer */
-	final_size = img->height * FRAME_WIDTH;
-	img = fpi_img_resize(img, final_size);
-	fpi_imgdev_image_captured(dev, img);
-
-	/* free strips and strip list */
-	g_slist_foreach(aesdev->strips, (GFunc) g_free, NULL);
-	g_slist_free(aesdev->strips);
-	aesdev->strips = NULL;
-}
-
-
 /****** FINGER PRESENCE DETECTION ******/
 
 static const struct aes_regwrite finger_det_reqs[] = {
@@ -514,13 +404,13 @@ static const struct aes_regwrite capture_reqs_2[] = {
 	{ AES2501_REG_CTRL2, AES2501_CTRL2_SET_ONE_SHOT },
 };
 
-static const struct aes_regwrite strip_scan_reqs[] = {
+static struct aes_regwrite strip_scan_reqs[] = {
 	{ AES2501_REG_IMAGCTRL,
 		AES2501_IMAGCTRL_TST_REG_ENABLE | AES2501_IMAGCTRL_HISTO_DATA_ENABLE },
 	{ AES2501_REG_STRTCOL, 0x00 },
 	{ AES2501_REG_ENDCOL, 0x2f },
 	{ AES2501_REG_CHANGAIN, AES2501_CHANGAIN_STAGE1_16X },
-	{ AES2501_REG_ADREFHI, 0x5b },
+	{ AES2501_REG_ADREFHI, AES2501_ADREFHI_MAX_VALUE },
 	{ AES2501_REG_ADREFLO, 0x20 },
 	{ AES2501_REG_CTRL2, AES2501_CTRL2_SET_ONE_SHOT },
 };
@@ -559,12 +449,6 @@ static void capture_read_strip_cb(struct libusb_transfer *transfer)
 		goto out;
 	}
 
-	/* FIXME: would preallocating strip buffers be a decent optimization? */
-	stripdata = g_malloc(192 * 8);
-	memcpy(stripdata, data + 1, 192*8);
-	aesdev->strips = g_slist_prepend(aesdev->strips, stripdata);
-	aesdev->strips_len++;
-
 	threshold = regval_from_dump(data + 1 + 192*8 + 1 + 16*2 + 1 + 8,
 		AES2501_REG_DATFMT);
 	if (threshold < 0) {
@@ -572,27 +456,54 @@ static void capture_read_strip_cb(struct libusb_transfer *transfer)
 		goto out;
 	}
 
-    sum = sum_histogram_values(data + 1 + 192*8, threshold & 0x0f);
+	sum = sum_histogram_values(data + 1 + 192*8, threshold & 0x0f);
 	if (sum < 0) {
 		fpi_ssm_mark_aborted(ssm, sum);
 		goto out;
 	}
 	fp_dbg("sum=%d", sum);
 
-	/* FIXME: 0 might be too low as a threshold */
-	/* FIXME: sometimes we get 0 in the middle of a scan, should we wait for
-	 * a few consecutive zeroes? */
-	/* FIXME: we should have an upper limit on the number of strips */
+	if (sum < AES2501_SUM_LOW_THRESH) {
+		strip_scan_reqs[4].value -= 0x8;
+		if (strip_scan_reqs[4].value < AES2501_ADREFHI_MIN_VALUE)
+			strip_scan_reqs[4].value = AES2501_ADREFHI_MIN_VALUE;
+	} else if (sum > AES2501_SUM_HIGH_THRESH) {
+		strip_scan_reqs[4].value += 0x8;
+		if (strip_scan_reqs[4].value > AES2501_ADREFHI_MAX_VALUE)
+			strip_scan_reqs[4].value = AES2501_ADREFHI_MAX_VALUE;
+	}
+	fp_dbg("ADREFHI is %.2x", strip_scan_reqs[4].value);
 
-	/* If sum is 0, finger has been removed */
+	/* Sum is 0, maybe finger was removed? Wait for 3 empty frames
+	 * to ensure
+	 */
 	if (sum == 0) {
-		/* assemble image and submit it to library */
-		assemble_and_submit_image(dev);
-		fpi_imgdev_report_finger_status(dev, FALSE);
-		/* marking machine complete will re-trigger finger detection loop */
-		fpi_ssm_mark_completed(ssm);
+		aesdev->no_finger_cnt++;
+		if (aesdev->no_finger_cnt == 3) {
+			struct fp_img *img;
+
+			aesdev->strips = g_slist_reverse(aesdev->strips);
+			img = aes_assemble(aesdev->strips, aesdev->strips_len,
+				FRAME_WIDTH, FRAME_HEIGHT);
+			g_slist_free_full(aesdev->strips, g_free);
+			aesdev->strips = NULL;
+			aesdev->strips_len = 0;
+			fpi_imgdev_image_captured(dev, img);
+			fpi_imgdev_report_finger_status(dev, FALSE);
+			/* marking machine complete will re-trigger finger detection loop */
+			fpi_ssm_mark_completed(ssm);
+		} else {
+			fpi_ssm_jump_to_state(ssm, CAPTURE_REQUEST_STRIP);
+		}
 	} else {
 		/* obtain next strip */
+		/* FIXME: would preallocating strip buffers be a decent optimization? */
+		stripdata = g_malloc(192 * 8);
+		memcpy(stripdata, data + 1, 192*8);
+		aesdev->no_finger_cnt = 0;
+		aesdev->strips = g_slist_prepend(aesdev->strips, stripdata);
+		aesdev->strips_len++;
+
 		fpi_ssm_jump_to_state(ssm, CAPTURE_REQUEST_STRIP);
 	}
 
@@ -677,6 +588,9 @@ static void start_capture(struct fp_img_dev *dev)
 		return;
 	}
 
+	aesdev->no_finger_cnt = 0;
+	/* Reset gain */
+	strip_scan_reqs[4].value = AES2501_ADREFHI_MAX_VALUE;
 	ssm = fpi_ssm_new(dev->dev, capture_run_state, CAPTURE_NUM_STATES);
 	fp_dbg("");
 	ssm->priv = dev;
@@ -945,7 +859,7 @@ static const struct usb_id id_table[] = {
 
 struct fp_img_driver aes2501_driver = {
 	.driver = {
-		.id = 4,
+		.id = AES2501_ID,
 		.name = FP_COMPONENT,
 		.full_name = "AuthenTec AES2501",
 		.id_table = id_table,

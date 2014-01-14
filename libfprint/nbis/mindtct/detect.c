@@ -122,7 +122,7 @@ static int lfs_detect_minutiae_V2(MINUTIAE **ominutiae,
 
    /* Initialize wave form lookup tables for DFT analyses. */
    /* used for direction binarization.                             */
-   if((ret = init_dftwaves(&dftwaves, dft_coefs, lfsparms->num_dft_waves,
+   if((ret = init_dftwaves(&dftwaves, g_dft_coefs, lfsparms->num_dft_waves,
                         lfsparms->windowsize))){
       /* Free memory allocated to this point. */
       free_dir2rad(dir2rad);
@@ -385,12 +385,12 @@ int get_minutiae(MINUTIAE **ominutiae, int **oquality_map,
                  const int id, const double ppmm, const LFSPARMS *lfsparms)
 {
    int ret;
-   MINUTIAE *minutiae;
-   int *direction_map, *low_contrast_map, *low_flow_map;
-   int *high_curve_map, *quality_map;
-   int map_w, map_h;
-   unsigned char *bdata;
-   int bw, bh;
+   MINUTIAE *minutiae = NULL;
+   int *direction_map = NULL, *low_contrast_map = NULL, *low_flow_map = NULL;
+   int *high_curve_map = NULL, *quality_map = NULL;
+   int map_w = 0, map_h = 0;
+   unsigned char *bdata = NULL;
+   int bw = 0, bh = 0;
 
    /* If input image is not 8-bit grayscale ... */
    if(id != 8){

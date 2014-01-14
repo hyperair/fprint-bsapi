@@ -28,15 +28,17 @@
 
 #include <fprint.h>
 
+#define array_n_elements(array) (sizeof(array) / sizeof(array[0]))
+
 #define container_of(ptr, type, member) ({                      \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
         (type *)( (char *)__mptr - offsetof(type,member) );})
 
 enum fpi_log_level {
-	LOG_LEVEL_DEBUG,
-	LOG_LEVEL_INFO,
-	LOG_LEVEL_WARNING,
-	LOG_LEVEL_ERROR,
+	FPRINT_LOG_LEVEL_DEBUG,
+	FPRINT_LOG_LEVEL_INFO,
+	FPRINT_LOG_LEVEL_WARNING,
+	FPRINT_LOG_LEVEL_ERROR,
 };
 
 void fpi_log(enum fpi_log_level, const char *component, const char *function,
@@ -53,14 +55,14 @@ void fpi_log(enum fpi_log_level, const char *component, const char *function,
 #endif
 
 #ifdef ENABLE_DEBUG_LOGGING
-#define fp_dbg(fmt...) _fpi_log(LOG_LEVEL_DEBUG, fmt)
+#define fp_dbg(fmt...) _fpi_log(FPRINT_LOG_LEVEL_DEBUG, fmt)
 #else
 #define fp_dbg(fmt...)
 #endif
 
-#define fp_info(fmt...) _fpi_log(LOG_LEVEL_INFO, fmt)
-#define fp_warn(fmt...) _fpi_log(LOG_LEVEL_WARNING, fmt)
-#define fp_err(fmt...) _fpi_log(LOG_LEVEL_ERROR, fmt)
+#define fp_info(fmt...) _fpi_log(FPRINT_LOG_LEVEL_INFO, fmt)
+#define fp_warn(fmt...) _fpi_log(FPRINT_LOG_LEVEL_WARNING, fmt)
+#define fp_err(fmt...) _fpi_log(FPRINT_LOG_LEVEL_ERROR, fmt)
 
 #ifndef NDEBUG
 #define BUG_ON(condition) \
@@ -89,6 +91,10 @@ enum fp_dev_state {
 	DEV_STATE_IDENTIFYING,
 	DEV_STATE_IDENTIFY_DONE,
 	DEV_STATE_IDENTIFY_STOPPING,
+	DEV_STATE_CAPTURE_STARTING,
+	DEV_STATE_CAPTURING,
+	DEV_STATE_CAPTURE_DONE,
+	DEV_STATE_CAPTURE_STOPPING,
 };
 
 struct fp_driver **fprint_get_drivers (void);
@@ -106,8 +112,8 @@ struct fp_dev {
 
 	/* drivers should not mess with any of the below */
 	enum fp_dev_state state;
-
 	int __enroll_stage;
+	int unconditional_capture;
 
 	/* async I/O callbacks and data */
 	/* FIXME: convert this to generic state operational data mechanism? */
@@ -127,6 +133,10 @@ struct fp_dev {
 	void *identify_cb_data;
 	fp_identify_stop_cb identify_stop_cb;
 	void *identify_stop_cb_data;
+	fp_capture_cb capture_cb;
+	void *capture_cb_data;
+	fp_capture_stop_cb capture_stop_cb;
+	void *capture_stop_cb_data;
 
 	/* FIXME: better place to put this? */
 	struct fp_print_data **identify_gallery;
@@ -144,6 +154,7 @@ enum fp_imgdev_action {
 	IMG_ACTION_ENROLL,
 	IMG_ACTION_VERIFY,
 	IMG_ACTION_IDENTIFY,
+	IMG_ACTION_CAPTURE,
 };
 
 enum fp_imgdev_enroll_state {
@@ -158,7 +169,7 @@ enum fp_imgdev_enroll_state {
 
 enum fp_imgdev_verify_state {
 	IMG_VERIFY_STATE_NONE = 0,
-	IMG_VERIFY_STATE_ACTIVATING 
+	IMG_VERIFY_STATE_ACTIVATING
 };
 
 struct fp_img_dev {
@@ -168,7 +179,9 @@ struct fp_img_dev {
 	int action_state;
 
 	struct fp_print_data *acquire_data;
+	struct fp_print_data *enroll_data;
 	struct fp_img *acquire_img;
+	int enroll_stage;
 	int action_result;
 
 	/* FIXME: better place to put this? */
@@ -177,8 +190,6 @@ struct fp_img_dev {
 	void *priv;
 };
 
-int fpi_imgdev_capture(struct fp_img_dev *imgdev, int unconditional,
-	struct fp_img **image);
 int fpi_imgdev_get_img_width(struct fp_img_dev *imgdev);
 int fpi_imgdev_get_img_height(struct fp_img_dev *imgdev);
 
@@ -213,6 +224,8 @@ struct fp_driver {
 	int (*verify_stop)(struct fp_dev *dev, gboolean iterating);
 	int (*identify_start)(struct fp_dev *dev);
 	int (*identify_stop)(struct fp_dev *dev, gboolean iterating);
+	int (*capture_start)(struct fp_dev *dev);
+	int (*capture_stop)(struct fp_dev *dev);
 };
 
 enum fp_print_data_type fpi_driver_get_data_type(struct fp_driver *drv);
@@ -256,8 +269,20 @@ extern struct fp_img_driver uru4000_driver;
 #ifdef ENABLE_AES1610
 extern struct fp_img_driver aes1610_driver;
 #endif
+#ifdef ENABLE_AES1660
+extern struct fp_img_driver aes1660_driver;
+#endif
 #ifdef ENABLE_AES2501
 extern struct fp_img_driver aes2501_driver;
+#endif
+#ifdef ENABLE_AES2550
+extern struct fp_img_driver aes2550_driver;
+#endif
+#ifdef ENABLE_AES2660
+extern struct fp_img_driver aes2660_driver;
+#endif
+#ifdef ENABLE_AES3500
+extern struct fp_img_driver aes3500_driver;
 #endif
 #ifdef ENABLE_AES4000
 extern struct fp_img_driver aes4000_driver;
@@ -270,6 +295,15 @@ extern struct fp_img_driver vcom5s_driver;
 #endif
 #ifdef ENABLE_VFS101
 extern struct fp_img_driver vfs101_driver;
+#endif
+#ifdef ENABLE_VFS301
+extern struct fp_img_driver vfs301_driver;
+#endif
+#ifdef ENABLE_UPEKTC_IMG
+extern struct fp_img_driver upektc_img_driver;
+#endif
+#ifdef ENABLE_ETES603
+extern struct fp_img_driver etes603_driver;
 #endif
 
 extern libusb_context *fpi_usb_ctx;
@@ -299,15 +333,19 @@ enum fp_print_data_type {
 	PRINT_DATA_NBIS_MINUTIAE,
 };
 
-struct fp_print_data {
-	uint16_t driver_id;
-	uint32_t devtype;
-	enum fp_print_data_type type;
+struct fp_print_data_item {
 	size_t length;
 	unsigned char data[0];
 };
 
-struct fpi_print_data_fp1 {
+struct fp_print_data {
+	uint16_t driver_id;
+	uint32_t devtype;
+	enum fp_print_data_type type;
+	GSList *prints;
+};
+
+struct fpi_print_data_fp2 {
 	char prefix[3];
 	uint16_t driver_id;
 	uint32_t devtype;
@@ -315,8 +353,14 @@ struct fpi_print_data_fp1 {
 	unsigned char data[0];
 } __attribute__((__packed__));
 
+struct fpi_print_data_item_fp2 {
+	uint32_t length;
+	unsigned char data[0];
+} __attribute__((__packed__));
+
 void fpi_data_exit(void);
-struct fp_print_data *fpi_print_data_new(struct fp_dev *dev, size_t length);
+struct fp_print_data *fpi_print_data_new(struct fp_dev *dev);
+struct fp_print_data_item *fpi_print_data_item_new(size_t length);
 gboolean fpi_print_data_compatible(uint16_t driver_id1, uint32_t devtype1,
 	enum fp_print_data_type type1, uint16_t driver_id2, uint32_t devtype2,
 	enum fp_print_data_type type2);
@@ -328,8 +372,8 @@ struct fp_minutiae {
 };
 
 /* bit values for fp_img.flags */
-#define FP_IMG_V_FLIPPED 		(1<<0)
-#define FP_IMG_H_FLIPPED 		(1<<1)
+#define FP_IMG_V_FLIPPED	(1<<0)
+#define FP_IMG_H_FLIPPED	(1<<1)
 #define FP_IMG_COLORS_INVERTED	(1<<2)
 #define FP_IMG_BINARIZED_FORM	(1<<3)
 
@@ -357,7 +401,7 @@ int fpi_img_compare_print_data(struct fp_print_data *enrolled_print,
 	struct fp_print_data *new_print);
 int fpi_img_compare_print_data_to_gallery(struct fp_print_data *print,
 	struct fp_print_data **gallery, int match_threshold, size_t *match_offset);
-struct fp_img *fpi_im_resize(struct fp_img *img, unsigned int factor);
+struct fp_img *fpi_im_resize(struct fp_img *img, unsigned int w_factor, unsigned int h_factor);
 
 /* polling and timeouts */
 
@@ -424,6 +468,11 @@ void fpi_drvcb_identify_started(struct fp_dev *dev, int status);
 void fpi_drvcb_report_identify_result(struct fp_dev *dev, int result,
 	size_t match_offset, struct fp_img *img);
 void fpi_drvcb_identify_stopped(struct fp_dev *dev);
+
+void fpi_drvcb_capture_started(struct fp_dev *dev, int status);
+void fpi_drvcb_report_capture_result(struct fp_dev *dev, int result,
+	struct fp_img *img);
+void fpi_drvcb_capture_stopped(struct fp_dev *dev);
 
 /* for image drivers */
 void fpi_imgdev_open_complete(struct fp_img_dev *imgdev, int status);

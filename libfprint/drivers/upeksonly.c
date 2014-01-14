@@ -30,6 +30,8 @@
 
 #include <fp_internal.h>
 
+#include "driver_ids.h"
+
 #define CTRL_TIMEOUT	1000
 #define IMG_WIDTH 288
 #define NUM_BULK_TRANSFERS 24
@@ -467,7 +469,6 @@ static void write_regs_finished(struct write_regs_data *wrdata, int result)
 
 static void write_regs_iterate(struct write_regs_data *wrdata)
 {
-	struct fpi_ssm *ssm;
 	struct libusb_control_setup *setup;
 	const struct sonly_regwrite *regwrite;
 	int r;
@@ -478,7 +479,6 @@ static void write_regs_iterate(struct write_regs_data *wrdata)
 	}
 
 	regwrite = &wrdata->regs[wrdata->regs_written];
-	ssm = wrdata->ssm;
 
 	fp_dbg("set %02x=%02x", regwrite->reg, regwrite->value);
 	setup = libusb_control_transfer_get_setup(wrdata->transfer);
@@ -1019,9 +1019,6 @@ static void initsm_2016_run_state(struct fpi_ssm *ssm)
 
 static void initsm_1000_run_state(struct fpi_ssm *ssm)
 {
-	struct fp_img_dev *dev = ssm->priv;
-	struct sonly_dev *sdev = dev->priv;
-
 	switch (ssm->cur_state) {
 	case INITSM_1000_WRITEV_1:
 		sm_write_regs(ssm, initsm_1000_writev_1, G_N_ELEMENTS(initsm_1000_writev_1));
@@ -1183,7 +1180,7 @@ static void initsm_complete(struct fpi_ssm *ssm)
 static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
 {
 	struct sonly_dev *sdev = dev->priv;
-	struct fpi_ssm *ssm;
+	struct fpi_ssm *ssm = NULL;
 	int i;
 
 	sdev->deactivating = FALSE;
@@ -1272,7 +1269,7 @@ static const struct usb_id id_table[] = {
 
 struct fp_img_driver upeksonly_driver = {
 	.driver = {
-		.id = 9,
+		.id = UPEKSONLY_ID,
 		.name = FP_COMPONENT,
 		.full_name = "UPEK TouchStrip Sensor-Only",
 		.id_table = id_table,

@@ -4,6 +4,7 @@
  * Copyright (C) 2007 Cyrille Bagard
  * Copyright (C) 2007 Vasily Khoruzhick
  * Copyright (C) 2009 Guido Grazioli <guido.grazioli@gmail.com>
+ * Copyright (C) 2012 Vasily Khoruzhick <anarsoul@gmail.com>
  *
  * Based on code from libfprint aes2501 driver.
  *
@@ -31,6 +32,8 @@
 
 #include <aeslib.h>
 #include <fp_internal.h>
+
+#include "driver_ids.h"
 
 static void start_capture(struct fp_img_dev *dev);
 static void complete_deactivation(struct fp_img_dev *dev);
@@ -110,103 +113,6 @@ static void generic_ignore_data_cb(struct libusb_transfer *transfer)
 	libusb_free_transfer(transfer);
 }
 
-
-static void read_regs_data_cb(struct libusb_transfer *transfer)
-{
-	struct aes1610_read_regs *rdata = transfer->user_data;
-	unsigned char *retdata = NULL;
-	int r;
-
-	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
-		r = -EIO;
-	} else if (transfer->length != transfer->actual_length) {
-		r = -EPROTO;
-	} else {
-		r = 0;
-		retdata = transfer->buffer;
-	}
-
-	rdata->callback(rdata->dev, r, retdata, rdata->user_data);
-	g_free(rdata);
-	g_free(transfer->buffer);
-	libusb_free_transfer(transfer);
-}
-
-static void read_regs_rq_cb(struct fp_img_dev *dev, int result, void *user_data)
-{
-	struct aes1610_read_regs *rdata = user_data;
-	struct libusb_transfer *transfer;
-	unsigned char *data;
-	int r;
-
-	g_free(rdata->regwrite);
-	if (result != 0)
-		goto err;
-
-	transfer = libusb_alloc_transfer(0);
-	if (!transfer) {
-		result = -ENOMEM;
-		goto err;
-	}
-
-	data = g_malloc(126);
-	libusb_fill_bulk_transfer(transfer, dev->udev, EP_IN, data, 126,
-		read_regs_data_cb, rdata, BULK_TIMEOUT);
-
-	r = libusb_submit_transfer(transfer);
-	if (r < 0) {
-		g_free(data);
-		libusb_free_transfer(transfer);
-		result = -EIO;
-		goto err;
-	}
-
-	return;
-err:
-	rdata->callback(dev, result, NULL, rdata->user_data);
-	g_free(rdata);
-}
-
-
-// XXX: this comes from aes2501 driver but it is unused here
-static void read_regs(struct fp_img_dev *dev, aes1610_read_regs_cb callback,
-	void *user_data)
-{
-	/* FIXME: regwrite is dynamic because of asynchronity. is this really
-	 * required? */
-	struct aes_regwrite *regwrite = g_malloc(sizeof(*regwrite));
-	struct aes1610_read_regs *rdata = g_malloc(sizeof(*rdata));
-
-	fp_dbg("");
-	//regwrite->reg = AES1610_REG_CTRL2;
-	//regwrite->value = AES1610_CTRL2_READ_REGS;
-	rdata->dev = dev;
-	rdata->callback = callback;
-	rdata->user_data = user_data;
-	rdata->regwrite = regwrite;
-
-	//aes_write_regv(dev, (const struct aes_regwrite *) regwrite, 1,
-	//	read_regs_rq_cb, rdata);
-}
-
-/* Read the value of a specific register from a register dump */
-static int regval_from_dump(unsigned char *data, uint8_t target)
-{
-	if (*data != FIRST_AES1610_REG) {
-		fp_err("not a register dump");
-		return -EILSEQ;
-	}
-
-	if (!(FIRST_AES1610_REG <= target && target <= LAST_AES1610_REG)) {
-		fp_err("out of range");
-		return -EINVAL;
-	}
-
-	target -= FIRST_AES1610_REG;
-	target *= 2;
-	return data[target + 1];
-}
-
 static void generic_write_regv_cb(struct fp_img_dev *dev, int result,
 	void *user_data)
 {
@@ -216,8 +122,6 @@ static void generic_write_regv_cb(struct fp_img_dev *dev, int result,
 	else
 		fpi_ssm_mark_aborted(ssm, result);
 }
-
-
 
 /* read the specified number of bytes from the IN endpoint but throw them
  * away, then increment the SSM */
@@ -243,150 +147,6 @@ static void generic_read_ignore_data(struct fpi_ssm *ssm, size_t bytes)
 		fpi_ssm_mark_aborted(ssm, r);
 	}
 }
-
-/****** IMAGE PROCESSING ******/
-
-static int sum_histogram_values(unsigned char *data, uint8_t threshold)
-{
-	int r = 0;
-	int i;
-	uint16_t *histogram = (uint16_t *)(data + 1);
-
-	if (*data != 0xde)
-		return -EILSEQ;
-
-	if (threshold > 0x0f)
-		return -EINVAL;
-
-	/* FIXME endianness */
-	for (i = threshold; i < 16; i++)
-		r += histogram[i];
-
-	return r;
-}
-
-/* find overlapping parts of  frames */
-static unsigned int find_overlap(unsigned char *first_frame,
-	unsigned char *second_frame, unsigned int *min_error)
-{
-	unsigned int dy;
-	unsigned int not_overlapped_height = 0;
-	*min_error = 255 * FRAME_SIZE;
-	for (dy = 0; dy < FRAME_HEIGHT; dy++) {
-		/* Calculating difference (error) between parts of frames */
-		unsigned int i;
-		unsigned int error = 0;
-		for (i = 0; i < FRAME_WIDTH * (FRAME_HEIGHT - dy); i++) {
-			/* Using ? operator to avoid abs function */
-			error += first_frame[i] > second_frame[i] ?
-				(first_frame[i] - second_frame[i]) :
-				(second_frame[i] - first_frame[i]);
-		}
-
-		/* Normalize error */
-		error *= 15;
-		error /= i;
-		if (error < *min_error) {
-			*min_error = error;
-			not_overlapped_height = dy;
-		}
-		first_frame += FRAME_WIDTH;
-	}
-
-	return not_overlapped_height;
-}
-
-/* assemble a series of frames into a single image */
-static unsigned int assemble(struct aes1610_dev *aesdev, unsigned char *output,
-	gboolean reverse, unsigned int *errors_sum)
-{
-	uint8_t *assembled = output;
-	int frame;
-	uint32_t image_height = FRAME_HEIGHT;
-	unsigned int min_error;
-	size_t num_strips = aesdev->strips_len;
-	GSList *list_entry = aesdev->strips;
-	*errors_sum = 0;
-
-	if (num_strips < 1)
-		return 0;
-
-	/* Rotating given data by 90 degrees
-	 * Taken from document describing aes1610 image format
-	 * TODO: move reversing detection here */
-
-	if (reverse)
-		output += (num_strips - 1) * FRAME_SIZE;
-	for (frame = 0; frame < num_strips; frame++) {
-		aes_assemble_image(list_entry->data, FRAME_WIDTH, FRAME_HEIGHT, output);
-
-		if (reverse)
-		    output -= FRAME_SIZE;
-		else
-		    output += FRAME_SIZE;
-		list_entry = g_slist_next(list_entry);
-	}
-
-	/* Detecting where frames overlaped */
-	output = assembled;
-	for (frame = 1; frame < num_strips; frame++) {
-		int not_overlapped;
-
-		output += FRAME_SIZE;
-		not_overlapped = find_overlap(assembled, output, &min_error);
-		*errors_sum += min_error;
-		image_height += not_overlapped;
-		assembled += FRAME_WIDTH * not_overlapped;
-		memcpy(assembled, output, FRAME_SIZE);
-	}
-	return image_height;
-}
-
-static void assemble_and_submit_image(struct fp_img_dev *dev)
-{
-	struct aes1610_dev *aesdev = dev->priv;
-	size_t final_size;
-	struct fp_img *img;
-	unsigned int errors_sum, r_errors_sum;
-
-	fp_dbg("");
-
-	BUG_ON(aesdev->strips_len == 0);
-
-	/* reverse list */
-	aesdev->strips = g_slist_reverse(aesdev->strips);
-
-	/* create buffer big enough for max image */
-	img = fpi_img_new(aesdev->strips_len * FRAME_SIZE);
-
-	img->flags = FP_IMG_COLORS_INVERTED;
-	img->height = assemble(aesdev, img->data, FALSE, &errors_sum);
-	img->height = assemble(aesdev, img->data, TRUE, &r_errors_sum);
-
-	if (r_errors_sum > errors_sum) {
-	    img->height = assemble(aesdev, img->data, FALSE, &errors_sum);
-		img->flags |= FP_IMG_V_FLIPPED | FP_IMG_H_FLIPPED;
-		fp_dbg("normal scan direction");
-	} else {
-		fp_dbg("reversed scan direction");
-	}
-
-	/* now that overlap has been removed, resize output image buffer */
-	final_size = img->height * FRAME_WIDTH;
-	img = fpi_img_resize(img, final_size);
-	/* FIXME: ugly workaround */
-	if (img->height < 12)
-		img->height = 12;
-	fpi_imgdev_image_captured(dev, img);
-
-	/* free strips and strip list */
-	g_slist_foreach(aesdev->strips, (GFunc) g_free, NULL);
-	g_slist_free(aesdev->strips);
-	aesdev->strips = NULL;
-	aesdev->strips_len = 0;
-	aesdev->blanks_count = 0;
-}
-
 
 /****** FINGER PRESENCE DETECTION ******/
 
@@ -415,15 +175,6 @@ static const struct aes_regwrite finger_det_reqs[] = {
 	{ 0x1B, 0x2D },
 	{ 0x81, 0x04 }
 };
-
-static const struct aes_regwrite finger_det_none[] = {
-	{ 0x80, 0x01 },
-	{ 0x82, 0x00 },
-	{ 0x86, 0x00 },
-	{ 0xB1, 0x28 },
-	{ 0x1D, 0x00 }
-};
-
 
 static void start_finger_detection(struct fp_img_dev *dev);
 
@@ -461,12 +212,6 @@ out:
 	libusb_free_transfer(transfer);
 }
 
-
-static void finger_det_none_cb(struct fp_img_dev *dev, int result, void *user_data) {
-	fpi_imgdev_report_finger_status(dev, FALSE);
-	start_finger_detection(dev);
-}
-
 static void finger_det_reqs_cb(struct fp_img_dev *dev, int result, void *user_data)
 {
 	struct libusb_transfer *transfer;
@@ -500,7 +245,6 @@ static void finger_det_reqs_cb(struct fp_img_dev *dev, int result, void *user_da
 static void start_finger_detection(struct fp_img_dev *dev)
 {
 	struct aes1610_dev *aesdev = dev->priv;
-	struct libusb_transfer *transfer;
 
 	if (aesdev->deactivating) {
 		complete_deactivation(dev);
@@ -780,7 +524,7 @@ static int adjust_gain(unsigned char *buffer, int status)
 
 /*
  * Restore the default gain values */
-static void restore_gain()
+static void restore_gain(void)
 {
 	strip_scan_reqs[0].value = list_BE_values[0];
 	strip_scan_reqs[1].value = 0x04;
@@ -815,7 +559,6 @@ static void capture_read_strip_cb(struct libusb_transfer *transfer)
 	struct aes1610_dev *aesdev = dev->priv;
 	unsigned char *data = transfer->buffer;
 	int sum, i;
-	int threshold;
 
 	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
 		fpi_ssm_mark_aborted(ssm, -EIO);
@@ -826,17 +569,6 @@ static void capture_read_strip_cb(struct libusb_transfer *transfer)
 	}
 
 	/* FIXME: would preallocating strip buffers be a decent optimization? */
-	//stripdata = g_malloc(128 * 4);
-	//memcpy(stripdata, data + 1, 128 * 4);
-	//aesdev->strips = g_slist_prepend(aesdev->strips, stripdata);
-	//aesdev->strips_len++;
-
-	/*threshold = regval_from_dump(data + 1 + 128*8 + 1 + 16*2 + 1 + 8,
-		0x97);
-	if (threshold < 0) {
-		fpi_ssm_mark_aborted(ssm, threshold);
-		goto out;
-	}*/
 
 	sum = 0;
 	for (i = 516; i < 530; i++)
@@ -876,11 +608,19 @@ static void capture_read_strip_cb(struct libusb_transfer *transfer)
 
 	/* stop capturing if MAX_FRAMES is reached */
 	if (aesdev->blanks_count > 10 || g_slist_length(aesdev->strips) >= MAX_FRAMES) {
+		struct fp_img *img;
+
 		fp_dbg("sending stop capture.... blanks=%d  frames=%d", aesdev->blanks_count, g_slist_length(aesdev->strips));
 		/* send stop capture bits */
 		aes_write_regv(dev, capture_stop, G_N_ELEMENTS(capture_stop), stub_capture_stop_cb, NULL);
-		/* assemble image and submit it to library */
-		assemble_and_submit_image(dev);
+		aesdev->strips = g_slist_reverse(aesdev->strips);
+		img = aes_assemble(aesdev->strips, aesdev->strips_len,
+			FRAME_WIDTH, FRAME_HEIGHT);
+		g_slist_free_full(aesdev->strips, g_free);
+		aesdev->strips = NULL;
+		aesdev->strips_len = 0;
+		aesdev->blanks_count = 0;
+		fpi_imgdev_image_captured(dev, img);
 		fpi_imgdev_report_finger_status(dev, FALSE);
 		/* marking machine complete will re-trigger finger detection loop */
 		fpi_ssm_mark_completed(ssm);
@@ -987,25 +727,8 @@ static const struct aes_regwrite stop_reader[] = {
 
 enum activate_states {
 	WRITE_INIT,
-//	READ_DATA,
-//	READ_REGS,
 	ACTIVATE_NUM_STATES,
 };
-
-/* this come from aes2501 and is unused here
-void activate_read_regs_cb(struct fp_img_dev *dev, int status,
-	unsigned char *regs, void *user_data)
-{
-	struct fpi_ssm *ssm = user_data;
-	struct aes1610_dev *aesdev = dev->priv;
-
-	if (status != 0) {
-		fpi_ssm_mark_aborted(ssm, status);
-	} else {
-		fpi_ssm_next_state(ssm);
-	}
-}
-*/
 
 static void activate_run_state(struct fpi_ssm *ssm)
 {
@@ -1018,14 +741,6 @@ static void activate_run_state(struct fpi_ssm *ssm)
 		fp_dbg("write init");
 		aes_write_regv(dev, init, G_N_ELEMENTS(init), generic_write_regv_cb, ssm);
 		break;
-/*	case READ_DATA:
-		fp_dbg("read data");
-		generic_read_ignore_data(ssm, 20);
-		break;
-	case READ_REGS:
-		fp_dbg("read regs");
-		read_regs(dev, activate_read_regs_cb, ssm);
-		break;*/
 	}
 }
 
@@ -1106,7 +821,7 @@ static const struct usb_id id_table[] = {
 
 struct fp_img_driver aes1610_driver = {
 	.driver = {
-		.id = 6,
+		.id = AES1610_ID,
 		.name = FP_COMPONENT,
 		.full_name = "AuthenTec AES1610",
 		.id_table = id_table,

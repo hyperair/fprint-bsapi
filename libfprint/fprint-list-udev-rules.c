@@ -30,30 +30,56 @@ static const struct usb_id whitelist_id_table[] = {
 
 static const struct usb_id blacklist_id_table[] = {
     { .vendor = 0x0483, .product = 0x2016 },
+    /* https://bugs.freedesktop.org/show_bug.cgi?id=66659 */
+    { .vendor = 0x045e, .product = 0x00bb },
     { 0, 0, 0 },
 };
 
 struct fp_driver whitelist = {
     .id_table = whitelist_id_table,
+    .full_name = "Hardcoded whitelist"
 };
+
+GHashTable *printed = NULL;
 
 static void print_driver (struct fp_driver *driver)
 {
-    int i, j, blacklist;
+    int i, j, blacklist, num_printed;
+
+    num_printed = 0;
 
     for (i = 0; driver->id_table[i].vendor != 0; i++) {
+        char *key;
+
 	blacklist = 0;
 	for (j = 0; blacklist_id_table[j].vendor != 0; j++) {
 	    if (driver->id_table[i].vendor == blacklist_id_table[j].vendor &&
-		driver->id_table[j].product == blacklist_id_table[j].product) {
+		driver->id_table[i].product == blacklist_id_table[j].product) {
 		blacklist = 1;
+		break;
 	    }
 	}
 	if (blacklist)
 	    continue;
 
-	printf ("SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"%04x\", ATTRS{idProduct}==\"%04x\", ATTRS{dev}==\"*\", ATTR{power/level}=\"auto\"\n", driver->id_table[i].vendor, driver->id_table[i].product);
+	key = g_strdup_printf ("%04x:%04x", driver->id_table[i].vendor, driver->id_table[i].product);
+
+	if (g_hash_table_lookup (printed, key) != NULL) {
+	    g_free (key);
+	    continue;
+	}
+
+	g_hash_table_insert (printed, key, GINT_TO_POINTER (1));
+
+	if (num_printed == 0)
+	    printf ("# %s\n", driver->full_name);
+
+	printf ("SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"%04x\", ATTRS{idProduct}==\"%04x\", ATTRS{dev}==\"*\", ATTR{power/control}=\"auto\"\n", driver->id_table[i].vendor, driver->id_table[i].product);
+	num_printed++;
     }
+
+    if (num_printed > 0)
+        printf ("\n");
 }
 
 int main (int argc, char **argv)
@@ -63,11 +89,15 @@ int main (int argc, char **argv)
 
     list = fprint_get_drivers ();
 
+    printed = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
     for (i = 0; list[i] != NULL; i++) {
 	print_driver (list[i]);
     }
 
     print_driver (&whitelist);
+
+    g_hash_table_destroy (printed);
 
     return 0;
 }

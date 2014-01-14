@@ -1,6 +1,6 @@
 /*
- * Shared functions between libfprint Authentec drivers
- * Copyright (C) 2007 Daniel Drake <dsd@gentoo.org>
+ * Driver IDs
+ * Copyright (C) 2012 Vasily Khoruzhick <anarsoul@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -17,27 +17,28 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef __AESLIB_H__
-#define __AESLIB_H__
+#ifndef __DRIVER_IDS
+#define __DRIVER_IDS
 
-#include <fp_internal.h>
-
-struct aes_regwrite {
-	unsigned char reg;
-	unsigned char value;
+enum {
+	UPEKTS_ID	= 1,
+	URU4000_ID	= 2,
+	AES4000_ID	= 3,
+	AES2501_ID	= 4,
+	UPEKTC_ID	= 5,
+	AES1610_ID	= 6,
+	FDU2000_ID	= 7,
+	VCOM5S_ID	= 8,
+	UPEKSONLY_ID	= 9,
+	VFS101_ID	= 10,
+	VFS301_ID	= 11,
+	AES2550_ID	= 12,
+	UPEKE2_ID	= 13,
+	AES1660_ID	= 14,
+	AES2660_ID	= 15,
+	AES3500_ID	= 16,
+	UPEKTC_IMG_ID	= 17,
+	ETES603_ID	= 18,
 };
 
-typedef void (*aes_write_regv_cb)(struct fp_img_dev *dev, int result,
-	void *user_data);
-
-void aes_write_regv(struct fp_img_dev *dev, const struct aes_regwrite *regs,
-	unsigned int num_regs, aes_write_regv_cb callback, void *user_data);
-
-void aes_assemble_image(unsigned char *input, size_t width, size_t height,
-	unsigned char *output);
-
-struct fp_img *aes_assemble(GSList *stripes, size_t stripes_len,
-	unsigned int frame_width, unsigned int frame_height);
-
 #endif
-

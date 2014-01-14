@@ -37,12 +37,18 @@
 
 #include <fp_internal.h>
 
+#include "driver_ids.h"
+
 #define EP_IN (1 | LIBUSB_ENDPOINT_IN)
 #define EP_OUT (2 | LIBUSB_ENDPOINT_OUT)
 #define TIMEOUT 5000
 
 #define MSG_READ_BUF_SIZE 0x40
 #define MAX_DATA_IN_READ_BUF (MSG_READ_BUF_SIZE - 9)
+
+enum {
+        UPEKE2_2016,
+};
 
 struct upeke2_dev {
 	gboolean enroll_passed;
@@ -738,14 +744,14 @@ static void initsm_run_state(struct fpi_ssm *ssm)
 		break;
     case SEND28_51: ;
 		unsigned char dummy28_51[] = { 0x04, 0x0a, 0x00, 0x00, 0x00 };
-		initsm_send_msg28_handler(ssm, 0x51, &dummy28_51, 5);
+		initsm_send_msg28_handler(ssm, 0x51, dummy28_51, 5);
 		break;
 	case READ28_51:
 		initsm_read_msg_handler(ssm, read28_51_cb);
 		break;
 	case SEND28_07: ;
 		unsigned char dummy28_07[] = { 0x04, 0x20, 0x00, 0x00, 0x00 };
-		initsm_send_msg28_handler(ssm, 0x07, &dummy28_07, 5);
+		initsm_send_msg28_handler(ssm, 0x07, dummy28_07, 5);
 		break;
 	case READ28_07:
 		initsm_read_msg_handler(ssm, read28_07_cb);
@@ -846,8 +852,7 @@ static struct fpi_ssm *deinitsm_new(struct fp_dev *dev)
 
 static int discover(struct libusb_device_descriptor *dsc, uint32_t *devtype)
 {
-	/* Revision 2 is what we're interested in */
-	if (dsc->bcdDevice == 2)
+	if (dsc->idProduct == 0x2016 && dsc->bcdDevice == 2)
 		return 1;
 
 	return 0;
@@ -1067,6 +1072,7 @@ static void e_handle_resp02(struct fp_dev *dev, unsigned char *data,
 	size_t data_len)
 {
 	struct fp_print_data *fdata = NULL;
+	struct fp_print_data_item *item = NULL;
 	int result = -EPROTO;
 
 	if (data_len < sizeof(scan_comp)) {
@@ -1075,9 +1081,11 @@ static void e_handle_resp02(struct fp_dev *dev, unsigned char *data,
 		fp_err("unrecognised data prefix %x %x %x %x %x",
 			data[0], data[1], data[2], data[3], data[4]);
 	} else {
-		fdata = fpi_print_data_new(dev, data_len - sizeof(scan_comp));
-		memcpy(fdata->data, data + sizeof(scan_comp),
+		fdata = fpi_print_data_new(dev);
+		item = fpi_print_data_item_new(data_len - sizeof(scan_comp));
+		memcpy(item->data, data + sizeof(scan_comp),
 			data_len - sizeof(scan_comp));
+		fdata->prints = g_slist_prepend(fdata->prints, item);
 
 		result = FP_ENROLL_COMPLETE;
 	}
@@ -1239,12 +1247,13 @@ static void verify_start_sm_run_state(struct fpi_ssm *ssm)
 		break;
 	case VERIFY_INIT: ;
 		struct fp_print_data *print = dev->verify_data;
-		size_t data_len = sizeof(verify_hdr) + print->length;
+		struct fp_print_data_item *item = print->prints->data;
+		size_t data_len = sizeof(verify_hdr) + item->length;
 		unsigned char *data = g_malloc(data_len);
 		struct libusb_transfer *transfer;
 
 		memcpy(data, verify_hdr, sizeof(verify_hdr));
-		memcpy(data + sizeof(verify_hdr), print->data, print->length);
+		memcpy(data + sizeof(verify_hdr), item->data, item->length);
 		transfer = alloc_send_cmd28_transfer(dev, 0x03, data, data_len,
 			verify_init_2803_cb, ssm);
 		g_free(data);
@@ -1451,12 +1460,12 @@ static int verify_stop(struct fp_dev *dev, gboolean iterating)
 }
 
 static const struct usb_id id_table[] = {
-	{ .vendor = 0x147e, .product = 0x2016 },
+	{ .vendor = 0x147e, .product = 0x2016, .driver_data = UPEKE2_2016 },
 	{ 0, 0, 0, }, /* terminating entry */
 };
 
 struct fp_driver upeke2_driver = {
-	.id = 1,
+	.id = UPEKE2_ID,
 	.name = FP_COMPONENT,
 	.full_name = "UPEK Eikon 2",
 	.id_table = id_table,
